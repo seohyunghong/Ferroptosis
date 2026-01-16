@@ -1,0 +1,64 @@
+# ---------------------------------
+# 1. Python 필수 무시 항목 (캐시, 컴파일)
+# ---------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# ---------------------------------
+# 2. 가상환경 (Virtual Environments)
+# ---------------------------------
+# 가상환경 폴더명에 따라 아래 중 해당하는 것 사용
+venv/
+env/
+ENV/
+.env
+.venv/
+anaconda3/
+miniconda3/
+
+# ---------------------------------
+# 3. 데이터 및 결과물 (중요!)
+# ---------------------------------
+# 원본 데이터나 결과 이미지가 Github에 올라가지 않도록 설정
+# 특정 폴더만 무시하고 싶다면 폴더명을 적으세요 (예: data/)
+data/
+datasets/
+result_*/        # result_cyto, result_nuclei 등 결과 폴더 통째로 무시
+results/
+# 개별 이미지 파일 무시 (소스코드 폴더에 이미지가 섞여있을 경우)
+*.jpg
+*.jpeg
+*.png
+*.tif
+*.tiff
+*.npy            # numpy 배열 파일 (용량 큼)
+
+# 단, 아이콘이나 로고 같은 건 올려야 한다면 '!'로 예외 처리 가능
+# !logo.png 
+
+# ---------------------------------
+# 4. IDE 및 OS 설정 파일
+# ---------------------------------
+.vscode/
+.idea/
+.DS_Store        # Mac 사용자 필수
+Thumbs.db        # Windows 사용자 필수
+*.swp            # vi 에디터 임시파일
