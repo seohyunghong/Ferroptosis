@@ -246,60 +246,134 @@ def extract_cell_features(mask, intensity_image, cell_labels=None):
     return pd.DataFrame(features)
 
 # ===== 세포 분류 시각화 =====
-
-def visualize_cell_classification(original_img, green_gt_img, masks, dead_labels, living_labels, save_path):
+def visualize_cell_classification_with_otsu_graph(original_img, green_gt_img, masks, dead_labels, living_labels, otsu_threshold, save_path):
     """
-    세포 분류 결과 시각화 (Dead/Living 구분)
+    세포 분류 결과를 8개의 이미지로 간소화하여 하나의 이미지로 저장
+    Otsu threshold 그래프를 추가하여 총 8개의 이미지를 포함
     """
     from matplotlib.patches import Patch
 
-    fig, axes = plt.subplots(2, 2, figsize=(14, 12))
+    fig, axes = plt.subplots(2, 4, figsize=(16, 10))  # 2x4 grid for 8 images
+    axes = axes.flatten()
 
-    # [0, 0] Original Image
-    axes[0, 0].imshow(original_img, cmap='gray')
-    axes[0, 0].set_title('Original Image', fontsize=14)
-    axes[0, 0].axis('off')
+    # [0] Otsu threshold (Otsu의 임계값을 임의로 추가해줍니다)
+    axes[0].imshow(green_gt_img, cmap='Greens')
+    axes[0].set_title(f'Otsu Threshold ({otsu_threshold:.2f})', fontsize=12)
+    axes[0].axis('off')
 
-    # [0, 1] Green GT
-    axes[0, 1].imshow(green_gt_img, cmap='Greens')
-    axes[0, 1].set_title('Green GT', fontsize=14)
-    axes[0, 1].axis('off')
+    # [1] Original Image
+    axes[1].imshow(original_img, cmap='gray')
+    axes[1].set_title('Original Image', fontsize=12)
+    axes[1].axis('off')
 
-    # [1, 0] Dead Cells (red)
-    dead_mask = np.zeros((*masks.shape, 3), dtype=np.float32)
-    for label in dead_labels:
-        dead_mask[masks == label] = [1, 0, 0]
+    # [2] Green GT Image
+    axes[2].imshow(green_gt_img, cmap='Greens')
+    axes[2].set_title('Green GT', fontsize=12)
+    axes[2].axis('off')
 
-    original_normalized = original_img.astype(np.float32) / original_img.max()
-    if len(original_normalized.shape) == 2:
-        original_rgb = np.stack([original_normalized] * 3, axis=-1)
-    else:
-        original_rgb = original_normalized
+    # [3] Instance Segmentation (다른 색상으로 세포 표시)
+    segmented_image = np.zeros((*masks.shape, 3), dtype=np.float32)
+    for label in np.unique(masks):
+        if label > 0:
+            segmented_image[masks == label] = np.random.rand(3)  # 랜덤 색상으로 구분
+    axes[3].imshow(segmented_image)
+    axes[3].set_title('Instance Segmentation', fontsize=12)
+    axes[3].axis('off')
 
-    dead_exists = np.any(dead_mask > 0, axis=-1)[:, :, np.newaxis]
-    dead_overlay = np.where(dead_exists, dead_mask * 0.6 + original_rgb * 0.4, original_rgb)
-    axes[1, 0].imshow(np.clip(dead_overlay, 0, 1))
-    axes[1, 0].set_title(f'Dead Cells (n={len(dead_labels)})', fontsize=14, color='red')
-    axes[1, 0].axis('off')
-
-    # [1, 1] Living Cells (green)
+    # [4] Living Cells (Green)
     living_mask = np.zeros((*masks.shape, 3), dtype=np.float32)
     for label in living_labels:
-        living_mask[masks == label] = [0, 1, 0]
+        living_mask[masks == label] = [0, 1, 0]  # Green for living cells
+    axes[4].imshow(living_mask)
+    axes[4].set_title('Living Cells (Green)', fontsize=12)
+    axes[4].axis('off')
 
-    living_exists = np.any(living_mask > 0, axis=-1)[:, :, np.newaxis]
-    living_overlay = np.where(living_exists, living_mask * 0.6 + original_rgb * 0.4, original_rgb)
-    axes[1, 1].imshow(np.clip(living_overlay, 0, 1))
-    axes[1, 1].set_title(f'Living Cells (n={len(living_labels)})', fontsize=14, color='green')
-    axes[1, 1].axis('off')
+    # [5] Dead Cells (Red)
+    dead_mask = np.zeros((*masks.shape, 3), dtype=np.float32)
+    for label in dead_labels:
+        dead_mask[masks == label] = [1, 0, 0]  # Red for dead cells
+    axes[5].imshow(dead_mask)
+    axes[5].set_title('Dead Cells (Red)', fontsize=12)
+    axes[5].axis('off')
 
-    dead_ratio = len(dead_labels)/(len(dead_labels)+len(living_labels))*100 if (len(dead_labels)+len(living_labels)) > 0 else 0
-    plt.suptitle(f'Cell Classification\nDead: {len(dead_labels)} | Living: {len(living_labels)} | Dead Ratio: {dead_ratio:.1f}%',
-                 fontsize=16, fontweight='bold', y=0.98)
+    # [6] Living + Dead Cells (Green + Red)
+    combined_mask = np.zeros((*masks.shape, 3), dtype=np.float32)
+    for label in living_labels:
+        combined_mask[masks == label] = [0, 1, 0]  # Green for living cells
+    for label in dead_labels:
+        combined_mask[masks == label] = [1, 0, 0]  # Red for dead cells
+    axes[6].imshow(combined_mask)
+    axes[6].set_title('Living + Dead (Green + Red)', fontsize=12)
+    axes[6].axis('off')
+
+    # [7] Otsu Threshold Histogram
+    axes[7].hist(green_gt_img.flatten(), bins=256, range=(0, 255), color='green', alpha=0.7)
+    axes[7].axvline(otsu_threshold, color='red', linestyle='--', linewidth=2, label=f'Otsu: {otsu_threshold:.0f}')
+    axes[7].set_title('Otsu Threshold Histogram', fontsize=12)
+    axes[7].set_xlabel('Intensity (0-255)')
+    axes[7].set_ylabel('Count')
+    axes[7].legend()
 
     plt.tight_layout()
     plt.savefig(save_path, dpi=200, bbox_inches='tight')
     plt.close()
+
+def visualize_gt_vs_seg(original_img, green_gt_img, gt_mask, masks, save_path):
+    """
+    Visualize and compare GT mask with segmentation result (IoU, Precision, Recall, F1).
+    Args:
+        original_img: Original image (used for visual comparison).
+        green_gt_img: Green channel GT image.
+        gt_mask: Binary ground truth mask.
+        masks: Segmentation mask from Cellpose.
+        save_path: Path to save the comparison image.
+    Returns:
+        iou, precision, recall, f1: Performance metrics.
+    """
+    from sklearn.metrics import precision_score, recall_score, f1_score
+
+    # Flatten the masks for metric calculation
+    gt_mask_flat = gt_mask.flatten()
+    masks_flat = masks.flatten()
+
+    # IoU calculation
+    intersection = np.sum((gt_mask_flat == 1) & (masks_flat > 0))  # True positives
+    union = np.sum((gt_mask_flat == 1) | (masks_flat > 0))  # Total union of the two
+    iou = intersection / float(union) if union != 0 else 0
+
+    # Precision, Recall, F1 Score calculation
+    precision = precision_score(gt_mask_flat, masks_flat > 0, zero_division=0)
+    recall = recall_score(gt_mask_flat, masks_flat > 0, zero_division=0)
+    f1 = f1_score(gt_mask_flat, masks_flat > 0, zero_division=0)
+
+    # Create a visual comparison image
+    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+
+    # [0] Original image
+    axes[0].imshow(original_img, cmap='gray')
+    axes[0].set_title('Original Image', fontsize=12)
+    axes[0].axis('off')
+
+    # [1] GT mask vs Segmentation result (Overlay)
+    overlay = np.zeros_like(original_img, dtype=np.float32)
+    overlay[gt_mask == 1] = [0, 1, 0]  # Green for GT
+    overlay[masks > 0] = [1, 0, 0]  # Red for Segmentation
+    axes[1].imshow(overlay)
+    axes[1].set_title('GT vs Segmentation', fontsize=12)
+    axes[1].axis('off')
+
+    # [2] GT vs Segmentation (Side by Side)
+    comparison = np.stack([gt_mask, masks], axis=-1)
+    axes[2].imshow(comparison)
+    axes[2].set_title(f'Comparison (IoU: {iou:.3f})', fontsize=12)
+    axes[2].axis('off')
+
+    # Save the comparison image
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=200, bbox_inches='tight')
+    plt.close()
+
+    return iou, precision, recall, f1
 
 # ===== 메인 파이프라인 =====
 
@@ -345,10 +419,10 @@ def process_image_pair(original_path, green_gt_path, output_dir, visualize_spots
     print(f"    - Creating GT mask with Otsu thresholding...")
     if visualize_spots:
         gt_mask, spot_centroids, gt_fig = create_gt_mask_otsu(green_gt_img, visualize=True)
-        gt_vis_path = os.path.join(output_dir, f"{img_name}_gt_mask_creation.png")
-        gt_fig.savefig(gt_vis_path, dpi=150, bbox_inches='tight')
-        plt.close(gt_fig)
-        print(f"    - GT mask creation visualization saved")
+        # gt_vis_path = os.path.join(output_dir, f"{img_name}_gt_mask_creation.png")
+        # gt_fig.savefig(gt_vis_path, dpi=150, bbox_inches='tight')
+        # plt.close(gt_fig)
+        # print(f"    - GT mask creation visualization saved")
     else:
         gt_mask, spot_centroids = create_gt_mask_otsu(green_gt_img, visualize=False)
     
@@ -389,11 +463,11 @@ def process_image_pair(original_path, green_gt_path, output_dir, visualize_spots
     }
     labels_path = os.path.join(output_dir, f"{img_name}_labels.npy")
     np.save(labels_path, labels_dict)
-    
-    # 7. 시각화
-    vis_path = os.path.join(output_dir, f"{img_name}_classification.png")
-    visualize_cell_classification(original_img, green_gt_img, masks, dead_cell_labels, living_cell_labels, vis_path)
-    
+        
+    otsu_threshold, _ = cv2.threshold(green_gt_img.astype(np.uint8), 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    save_path = os.path.join(output_dir, f"{img_name}_classification_with_otsu.png")
+    visualize_cell_classification_with_otsu_graph(original_img, green_gt_img, masks, dead_cell_labels, living_cell_labels, otsu_threshold, save_path)
+
     # GT vs Segmentation 비교
     gt_vs_seg_path = os.path.join(output_dir, f"{img_name}_gt_vs_seg.png")
     iou, precision, recall, f1 = visualize_gt_vs_seg(original_img, green_gt_img, gt_mask, masks, gt_vs_seg_path)
