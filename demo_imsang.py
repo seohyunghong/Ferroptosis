@@ -63,7 +63,6 @@ def create_gt_mask_otsu(green_img, visualize=False):
         255,
         cv2.THRESH_BINARY + cv2.THRESH_OTSU
     )
-    print(f"    - Otsu threshold: {otsu_threshold:.2f} (0-255 scale)")
 
     # 3. Binary mask를 bool로 변환
     gt_mask = gt_mask_uint8 > 0
@@ -103,8 +102,6 @@ def create_gt_mask_otsu(green_img, visualize=False):
 
     gt_pixels = np.sum(final_gt_mask)
     gt_percentage = gt_pixels / final_gt_mask.size * 100
-    print(f"    - GT mask pixels: {gt_pixels} ({gt_percentage:.2f}%)")
-    print(f"    - GT regions (spots): {len(spot_centroids)}")
 
     if visualize:
         from skimage.color import label2rgb
@@ -211,10 +208,8 @@ def match_masks_to_spots_intersection(seg_masks, gt_mask):
                 'area': gt_region.area,
                 'intersection': best_intersection
             })
-            print(f"      GT region {i+1} (area: {gt_region.area}, centroid: {int(cy)}, {int(cx)}) → Seg label {best_label} (intersection: {best_intersection} pixels)")
         else:
             cy, cx = gt_region.centroid
-            print(f"      GT region {i+1} (area: {gt_region.area}, centroid: {int(cy)}, {int(cx)}) → No seg mask found!")
             matching_details.append({
                 'gt_region_id': i + 1,
                 'centroid': (int(cy), int(cx)),
@@ -428,7 +423,6 @@ def visualize_cell_classification_with_outlines(original_img, green_gt_img, mask
     plt.tight_layout()
     plt.savefig(save_path, dpi=200, bbox_inches='tight')
     plt.close()
-
 def visualize_gt_vs_seg(original_img, green_gt_img, gt_mask, masks, dead_labels, save_path):
     """
     Dead cell에 대해서만 GT mask vs segmentation 비교
@@ -475,7 +469,7 @@ def visualize_gt_vs_seg(original_img, green_gt_img, gt_mask, masks, dead_labels,
         precision = recall = f1 = 0.0
     
     # Visualization
-    fig, axes = plt.subplots(1, 4, figsize=(20, 5))
+    fig, axes = plt.subplots(1, 3, figsize=(15, 5))  # 4 -> 3로 변경
     
     # [0] Original
     if len(original_img.shape) == 3:
@@ -495,39 +489,17 @@ def visualize_gt_vs_seg(original_img, green_gt_img, gt_mask, masks, dead_labels,
     axes[2].set_title(f'Dead Cell Seg\n({len(dead_labels)} cells, {np.sum(dead_seg_mask)} pixels)', fontsize=12)
     axes[2].axis('off')
     
-    # [3] GT (green) vs Dead Seg (red) overlay
-    if len(original_img.shape) == 3:
-        gray_base = np.mean(original_img, axis=2).astype(np.uint8)
-    else:
-        gray_base = original_img.astype(np.uint8)
-    
-    gray_base_norm = gray_base / 255.0
-    overlay = np.stack([gray_base_norm, gray_base_norm, gray_base_norm], axis=-1)
-    
-    # GT only (green), Seg only (red), Overlap (yellow)
-    gt_only = gt_mask & ~dead_seg_mask
-    seg_only = ~gt_mask & dead_seg_mask
-    overlap = gt_mask & dead_seg_mask
-    
-    alpha = 0.6
-    overlay[gt_only] = overlay[gt_only] * (1 - alpha) + np.array([0, 1, 0]) * alpha
-    overlay[seg_only] = overlay[seg_only] * (1 - alpha) + np.array([1, 0, 0]) * alpha
-    overlay[overlap] = overlay[overlap] * (1 - alpha) + np.array([1, 1, 0]) * alpha
-    
-    axes[3].imshow(overlay)
-    
     # Legend
     from matplotlib.patches import Patch
     legend_elements = [
         Patch(facecolor='green', label=f'GT only'),
-        Patch(facecolor='red', label=f'Seg only'),
-        Patch(facecolor='yellow', label=f'Overlap')
+        Patch(facecolor='red', label=f'Seg only')
     ]
-    axes[3].legend(handles=legend_elements, loc='upper right', fontsize=9)
+    axes[2].legend(handles=legend_elements, loc='upper right', fontsize=9)
     
     metrics_text = f'IoU: {iou:.3f} | P: {precision:.3f} | R: {recall:.3f} | F1: {f1:.3f}'
-    axes[3].set_title(f'GT vs Dead Seg\n{metrics_text}', fontsize=11)
-    axes[3].axis('off')
+    axes[2].set_title(f'GT vs Dead Seg\n{metrics_text}', fontsize=11)
+    axes[2].axis('off')
     
     plt.tight_layout()
     plt.savefig(save_path, dpi=200, bbox_inches='tight')
