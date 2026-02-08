@@ -1,0 +1,12 @@
+checkpoint/
+*.zip
+*.npy
+*.pth
+*.pt
+*.log
+MorphoGenie_code_folder/processed/
+MorphoGenie_code_folder/processed_3sample/
+MorphoGenie_code_folder/processed_3sample_0203/
+MorphoGenie_code_folder/train_result/
+morphology_analysis/
+__pycache__/

@@ -1,0 +1,3 @@
+[submodule "MorphoGenie_code_folder/MorphoGenie_code_folder/MorphoGenie"]
+	path = MorphoGenie_code_folder/MorphoGenie_code_folder/MorphoGenie
+	url = https://github.com/rashmisrm/MorphoGenie.git

@@ -10,7 +10,6 @@ from skimage import measure, morphology, filters, segmentation
 from scipy import ndimage
 from tqdm import tqdm
 from datetime import datetime, timezone, timedelta
-from multiprocessing import Pool, cpu_count
 import cv2
 
 # ===== 설정 =====
@@ -37,100 +36,11 @@ class Config:
     
     USE_GPU = core.use_gpu()
 
-# ===== 배경 형광 및 아티팩트 제거 전처리 =====
-
-def preprocess_green_image(green_img, background_threshold=20, min_spot_area=10, max_artifact_area=300):
-    """
-    배경 형광과 작은 아티팩트를 제거하여 명확한 spot만 남김
-    
-    배경 형광이 퍼져있는 경우:
-    1. Median 기반 배경 제거
-    2. 작은 밝은 클러스터 제거 (번짐 아티팩트)
-    3. 밝기가 낮은 작은 영역 제거
-    
-    Args:
-        green_img: Green channel 이미지
-        background_threshold: 평균 밝기가 이 값보다 높으면 전처리 수행
-        min_spot_area: 최소 spot 면적 (이보다 작으면 노이즈)
-        max_artifact_area: 최대 아티팩트 면적 (작은 번짐 클러스터 제거용)
-    
-    Returns:
-        processed_img: 전처리된 이미지
-        is_preprocessed: 전처리 수행 여부
-    """
-    # 8-bit 변환
-    if green_img.max() <= 1.0:
-        img_uint8 = (green_img * 255).astype(np.uint8)
-    else:
-        img_uint8 = green_img.astype(np.uint8)
-    
-    # 통계 계산
-    mean_intensity = np.mean(img_uint8)
-    median_intensity = np.median(img_uint8)
-    
-    print(f"    - Original image - Mean: {mean_intensity:.1f}, Median: {median_intensity:.1f}")
-    
-    # 평균 밝기가 높으면 (> background_threshold) 전처리 수행
-    if mean_intensity > background_threshold:
-        print(f"    - High background detected! Applying preprocessing...")
-        
-        # 1단계: 배경 제거
-        # Median 기반 배경 추정 (더 robust)
-        background_level = median_intensity
-        processed = img_uint8.astype(np.float32) - background_level
-        processed = np.clip(processed, 0, 255).astype(np.uint8)
-        
-        print(f"    - Background subtraction (level: {background_level:.1f})")
-        
-        # 2단계: 작은 아티팩트 제거
-        # Otsu threshold로 일단 분리
-        otsu_thresh, binary = cv2.threshold(processed, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        print(f"    - Otsu threshold for artifact detection: {otsu_thresh:.1f}")
-        
-        # Connected components 분석
-        labeled = measure.label(binary > 0)
-        regions = measure.regionprops(labeled, intensity_image=processed)
-        
-        # 아티팩트 필터링: 작은 클러스터 또는 밝기 낮은 영역 제거
-        artifact_mask = np.zeros_like(binary, dtype=bool)
-        valid_spot_count = 0
-        removed_artifacts = 0
-        
-        for region in regions:
-            area = region.area
-            mean_intensity_region = region.mean_intensity
-            
-            # 조건 1: 너무 작은 영역 (노이즈)
-            # 조건 2: 면적은 있지만 밝기가 낮은 영역 (번짐 아티팩트)
-            is_artifact = (
-                area < min_spot_area or  # 너무 작음
-                (area < max_artifact_area and mean_intensity_region < otsu_thresh * 2)  # 작고 어두움
-            )
-            
-            if is_artifact:
-                artifact_mask[labeled == region.label] = True
-                removed_artifacts += 1
-            else:
-                valid_spot_count += 1
-        
-        # 아티팩트 영역을 0으로 설정
-        processed[artifact_mask] = 0
-        
-        print(f"    - Artifacts removed: {removed_artifacts} regions")
-        print(f"    - Valid spots remaining: {valid_spot_count} regions")
-        print(f"    - After preprocessing - Mean: {np.mean(processed):.1f}, Max: {np.max(processed)}")
-        
-        return processed, True
-    else:
-        print(f"    - Background level acceptable, no preprocessing needed")
-        return img_uint8, False
-
 # ===== Green GT Mask 생성 (Otsu) =====
 
 def create_gt_mask_otsu(green_img, visualize=False):
     """
     Green 형광 이미지에서 Otsu threshold로 GT mask 생성
-    (배경 형광이 높으면 자동으로 전처리 수행)
 
     Args:
         green_img: Green channel 이미지 (grayscale)
@@ -139,29 +49,30 @@ def create_gt_mask_otsu(green_img, visualize=False):
     Returns:
         gt_mask: Binary GT mask
         spot_centroids: 검출된 spot의 중심 좌표 리스트 [(y, x), ...]
-        otsu_threshold: 사용된 Otsu threshold 값
     """
-    # 전처리: 배경 형광 및 아티팩트 제거
-    img_uint8, is_preprocessed = preprocess_green_image(green_img)
+    # 1. 8-bit 이미지로 변환
+    if green_img.max() <= 1.0:
+        img_uint8 = (green_img * 255).astype(np.uint8)
+    else:
+        img_uint8 = green_img.astype(np.uint8)
 
-    # Otsu thresholding
+    # 2. OpenCV Otsu thresholding
     otsu_threshold, gt_mask_uint8 = cv2.threshold(
         img_uint8,
         0,
         255,
         cv2.THRESH_BINARY + cv2.THRESH_OTSU
     )
-    
     print(f"    - Otsu threshold: {otsu_threshold:.2f} (0-255 scale)")
 
-    # Binary mask를 bool로 변환
+    # 3. Binary mask를 bool로 변환
     gt_mask = gt_mask_uint8 > 0
 
     # Opening 전 객체 수 계산
     labeled_before = measure.label(gt_mask)
     num_objects_before = labeled_before.max()
 
-    # Morphological opening (작은 노이즈 제거)
+    # 4. Morphological opening (작은 노이즈 제거)
     kernel = morphology.disk(Config.MORPH_KERNEL_SIZE)
     gt_mask_clean = morphology.binary_opening(gt_mask, kernel)
 
@@ -169,11 +80,11 @@ def create_gt_mask_otsu(green_img, visualize=False):
     labeled_after = measure.label(gt_mask_clean)
     num_objects_after = labeled_after.max()
 
-    # Connected component labeling
+    # 5. Connected component labeling
     labeled = measure.label(gt_mask_clean)
     regions = measure.regionprops(labeled)
 
-    # Spot 필터링 (면적 기준만)
+    # 6. Spot 필터링 (면적 기준만)
     valid_regions = []
     final_labeled_mask = np.zeros_like(green_img, dtype=np.int32)
     final_gt_mask = np.zeros_like(green_img, dtype=bool)
@@ -187,12 +98,11 @@ def create_gt_mask_otsu(green_img, visualize=False):
             final_labeled_mask[labeled == region.label] = new_label
             new_label += 1
 
-    # Centroid 추출
+    # 7. Centroid 추출
     spot_centroids = [(region.centroid[0], region.centroid[1]) for region in valid_regions]
 
     gt_pixels = np.sum(final_gt_mask)
     gt_percentage = gt_pixels / final_gt_mask.size * 100
-    
     print(f"    - GT mask pixels: {gt_pixels} ({gt_percentage:.2f}%)")
     print(f"    - GT regions (spots): {len(spot_centroids)}")
 
@@ -201,10 +111,9 @@ def create_gt_mask_otsu(green_img, visualize=False):
 
         fig, axes = plt.subplots(2, 2, figsize=(14, 12))
 
-        # [0,0] Preprocessed image
+        # [0,0] Original
         axes[0, 0].imshow(img_uint8, cmap='Greens')
-        title = 'Preprocessed Green GT' if is_preprocessed else 'Original Green GT'
-        axes[0, 0].set_title(title, fontsize=12)
+        axes[0, 0].set_title('Original Green GT', fontsize=12)
         axes[0, 0].axis('off')
 
         # [0,1] Histogram with Otsu threshold (로그 스케일)
@@ -256,36 +165,20 @@ def match_masks_to_spots_intersection(seg_masks, gt_mask):
     labeled_gt = measure.label(gt_mask)
     gt_regions = measure.regionprops(labeled_gt)
     
+    
     for i, gt_region in enumerate(gt_regions):
         # 이 GT region의 mask
         gt_region_mask = (labeled_gt == gt_region.label)
         
-        # Bbox 영역만 추출하여 효율성 향상
-        minr, minc, maxr, maxc = gt_region.bbox
-        
-        # Bbox 영역 확장 (주변 seg mask도 고려)
-        padding = 20
-        minr = max(0, minr - padding)
-        minc = max(0, minc - padding)
-        maxr = min(seg_masks.shape[0], maxr + padding)
-        maxc = min(seg_masks.shape[1], maxc + padding)
-        
-        # Bbox 영역 내의 unique seg labels
-        local_seg_masks = seg_masks[minr:maxr, minc:maxc]
-        local_gt_mask = gt_region_mask[minr:maxr, minc:maxc]
-        
-        unique_seg_labels = np.unique(local_seg_masks)
-        unique_seg_labels = unique_seg_labels[unique_seg_labels > 0]  # 배경 제외
-        
-        # 각 seg label과 intersection 계산
+        # 각 seg mask와 intersection 계산
         best_intersection = 0
         best_label = None
         
-        for seg_label in unique_seg_labels:
-            seg_cell_mask = (local_seg_masks == seg_label)
+        for seg_label in range(1, seg_masks.max() + 1):
+            seg_cell_mask = (seg_masks == seg_label)
             
             # Intersection (겹치는 픽셀 수)
-            intersection = np.sum(seg_cell_mask & local_gt_mask)
+            intersection = np.logical_and(seg_cell_mask, gt_region_mask).sum()
             
             if intersection > best_intersection:
                 best_intersection = intersection
@@ -311,10 +204,45 @@ def match_masks_to_spots_intersection(seg_masks, gt_mask):
                 'area': gt_region.area,
                 'intersection': 0
             })
-    
-    print(f"    - Matched {len(dead_cell_labels)} seg masks as dead cells")
-    
+        
     return dead_cell_labels, matching_details
+
+def match_masks_to_spots_iou(seg_masks, gt_mask, iou_threshold=0.01):
+    """
+    각 spot region과 seg mask의 IoU로 매칭 (threshold 낮춤)
+    """
+    from skimage import measure
+    
+    dead_cell_labels = set()
+    
+    # GT mask에서 각 spot region 추출
+    labeled_gt = measure.label(gt_mask)
+    gt_regions = measure.regionprops(labeled_gt)
+    
+    for gt_region in gt_regions:
+        gt_region_mask = np.zeros_like(seg_masks, dtype=bool)
+        gt_region_mask[labeled_gt == gt_region.label] = True
+        
+        # 각 seg mask와 IoU 계산
+        best_iou = 0
+        best_label = None
+        
+        for seg_label in range(1, seg_masks.max() + 1):
+            seg_cell_mask = (seg_masks == seg_label)
+            
+            intersection = np.logical_and(seg_cell_mask, gt_region_mask).sum()
+            union = np.logical_or(seg_cell_mask, gt_region_mask).sum()
+            
+            if union > 0:
+                iou = intersection / union
+                if iou > best_iou:
+                    best_iou = iou
+                    best_label = seg_label
+        
+        if best_iou > iou_threshold and best_label is not None:
+            dead_cell_labels.add(best_label)
+    
+    return dead_cell_labels
 
 # ===== Feature Extraction =====
 
@@ -365,13 +293,24 @@ def extract_cell_features(mask, intensity_image, cell_labels=None):
 def get_cell_outlines(masks, labels, thickness=2):
     """
     특정 label들의 outline 추출
+    
+    Args:
+        masks: Segmentation masks
+        labels: Label set to extract outlines for
+        thickness: Outline 두께 (픽셀)
+    
+    Returns:
+        outline_mask: Boolean mask of outlines
     """
     outline_mask = np.zeros_like(masks, dtype=bool)
     
     for label in labels:
         cell_mask = (masks == label)
+        
+        # Erosion으로 outline 추출
         eroded = morphology.binary_erosion(cell_mask, morphology.disk(thickness))
         outline = cell_mask & ~eroded
+        
         outline_mask |= outline
     
     return outline_mask
@@ -420,6 +359,7 @@ def visualize_cell_classification_with_outlines(original_img, green_gt_img, mask
     for label in living_labels:
         living_mask[masks == label] = [0, 1, 0]
     
+    # Living outline (dark green)
     living_outline = get_cell_outlines(masks, living_labels, thickness=2)
     living_mask[living_outline] = [0, 0.5, 0]
     
@@ -432,6 +372,7 @@ def visualize_cell_classification_with_outlines(original_img, green_gt_img, mask
     for label in dead_labels:
         dead_mask[masks == label] = [1, 0, 0]
     
+    # Dead outline (dark red)
     dead_outline = get_cell_outlines(masks, dead_labels, thickness=2)
     dead_mask[dead_outline] = [0.5, 0, 0]
     
@@ -446,6 +387,7 @@ def visualize_cell_classification_with_outlines(original_img, green_gt_img, mask
     for label in dead_labels:
         combined_mask[masks == label] = [1, 0, 0]
     
+    # Outlines
     combined_mask[living_outline] = [0, 0.5, 0]
     combined_mask[dead_outline] = [0.5, 0, 0]
     
@@ -470,6 +412,23 @@ def visualize_cell_classification_with_outlines(original_img, green_gt_img, mask
 def visualize_gt_vs_seg(original_img, green_gt_img, gt_mask, masks, dead_labels, save_path):
     """
     Dead cell에 대해서만 GT mask vs segmentation 비교
+    
+    Args:
+        original_img: Original image
+        green_gt_img: Green GT image
+        gt_mask: Binary GT mask (전체)
+        masks: Segmentation masks (전체)
+        dead_labels: Dead cell로 분류된 seg mask labels
+        save_path: Save path
+    
+    Returns:
+        iou, precision, recall, f1: Dead cell에 대한 metrics
+    
+    Metrics:
+    - IoU: GT와 Dead seg의 겹침 정도 (0~1)
+    - Precision: Dead seg 중 GT와 일치하는 비율 (TP / (TP+FP))
+    - Recall: GT 중 Dead seg로 검출된 비율 (TP / (TP+FN))
+    - F1: Precision과 Recall의 조화평균
     """
     from sklearn.metrics import precision_score, recall_score, f1_score
     
@@ -496,9 +455,27 @@ def visualize_gt_vs_seg(original_img, green_gt_img, gt_mask, masks, dead_labels,
         precision = recall = f1 = 0.0
     
     # Visualization
-    fig, axes = plt.subplots(1, 1, figsize=(7, 5))
+    fig, axes = plt.subplots(1, 4, figsize=(20, 5))
     
-    # GT (green) vs Dead Seg (red) overlay
+    # [0] Original
+    if len(original_img.shape) == 3:
+        axes[0].imshow(original_img)
+    else:
+        axes[0].imshow(original_img, cmap='gray')
+    axes[0].set_title('Original Image', fontsize=12)
+    axes[0].axis('off')
+    
+    # [1] GT mask (green spots only)
+    axes[1].imshow(gt_mask, cmap='Greens', alpha=0.7)
+    axes[1].set_title(f'GT Mask\n({np.sum(gt_mask)} pixels)', fontsize=12)
+    axes[1].axis('off')
+    
+    # [2] Dead cell segmentation
+    axes[2].imshow(dead_seg_mask, cmap='Reds', alpha=0.7)
+    axes[2].set_title(f'Dead Cell Seg\n({len(dead_labels)} cells, {np.sum(dead_seg_mask)} pixels)', fontsize=12)
+    axes[2].axis('off')
+    
+    # [3] GT (green) vs Dead Seg (red) overlay
     if len(original_img.shape) == 3:
         gray_base = np.mean(original_img, axis=2).astype(np.uint8)
     else:
@@ -517,7 +494,7 @@ def visualize_gt_vs_seg(original_img, green_gt_img, gt_mask, masks, dead_labels,
     overlay[seg_only] = overlay[seg_only] * (1 - alpha) + np.array([1, 0, 0]) * alpha
     overlay[overlap] = overlay[overlap] * (1 - alpha) + np.array([1, 1, 0]) * alpha
     
-    axes.imshow(overlay)
+    axes[3].imshow(overlay)
     
     # Legend
     from matplotlib.patches import Patch
@@ -526,11 +503,11 @@ def visualize_gt_vs_seg(original_img, green_gt_img, gt_mask, masks, dead_labels,
         Patch(facecolor='red', label=f'Seg only'),
         Patch(facecolor='yellow', label=f'Overlap')
     ]
-    axes.legend(handles=legend_elements, loc='upper right', fontsize=9)
+    axes[3].legend(handles=legend_elements, loc='upper right', fontsize=9)
     
     metrics_text = f'IoU: {iou:.3f} | P: {precision:.3f} | R: {recall:.3f} | F1: {f1:.3f}'
-    axes.set_title(f'GT vs Dead Seg\n{metrics_text}', fontsize=11)
-    axes.axis('off')
+    axes[3].set_title(f'GT vs Dead Seg\n{metrics_text}', fontsize=11)
+    axes[3].axis('off')
     
     plt.tight_layout()
     plt.savefig(save_path, dpi=200, bbox_inches='tight')
@@ -589,17 +566,19 @@ def process_image_pair(original_path, green_gt_path, output_dir, visualize_spots
     total_cells = masks.max()
     print(f"    - Total segmented cells: {total_cells}")
     
-    # 3. GT Mask 생성 (Otsu + 전처리)
+    # 3. GT Mask 생성 (Otsu)
     print(f"    - Creating GT mask with Otsu thresholding...")
     if visualize_spots:
         gt_mask, spot_centroids, gt_fig, otsu_threshold = create_gt_mask_otsu(green_gt_img, visualize=True)
         gt_vis_path = os.path.join(output_dir, f"{img_name}_gt_mask_creation.png")
         gt_fig.savefig(gt_vis_path, dpi=150, bbox_inches='tight')
         plt.close(gt_fig)
+        print(f"    - GT mask creation saved")
     else:
         gt_mask, spot_centroids, otsu_threshold = create_gt_mask_otsu(green_gt_img, visualize=False)
     
     # 4. Mask-Spot 매칭 (Intersection 기반)
+    print(f"    - Matching GT spots to cell masks (intersection-based)...")
     dead_cell_labels, matching_details = match_masks_to_spots_intersection(masks, gt_mask)
     
     all_cell_labels = set(range(1, total_cells + 1))
@@ -645,6 +624,7 @@ def process_image_pair(original_path, green_gt_path, output_dir, visualize_spots
     # GT vs Segmentation (Dead cell만)
     gt_vs_seg_path = os.path.join(output_dir, f"{img_name}_gt_vs_seg.png")
     iou, precision, recall, f1 = visualize_gt_vs_seg(original_img, green_gt_img, gt_mask, masks, dead_cell_labels, gt_vs_seg_path)
+    print(f"    - GT vs Seg - IoU: {iou:.3f}, P: {precision:.3f}, R: {recall:.3f}, F1: {f1:.3f}")
     
     # 통계
     summary = {
@@ -664,46 +644,16 @@ def process_image_pair(original_path, green_gt_path, output_dir, visualize_spots
     
     return all_features, masks, summary
 
-# ===== 배치 처리 (단일 프로세스) =====
+# ===== 배치 처리 =====
 
-def process_single_pair(args):
+def batch_process(img_dir, green_gt_dir, base_output_dir):
     """
-    단일 이미지 쌍 처리 (병렬 처리용 wrapper)
-    """
-    original_path, green_gt_path, output_dir = args
-    try:
-        _, _, summary = process_image_pair(
-            original_path, green_gt_path, output_dir,
-            visualize_spots=False
-        )
-        return summary
-    except Exception as e:
-        img_name = Path(original_path).stem
-        print(f"\n  !!! Error processing {img_name}: {e}")
-        import traceback
-        traceback.print_exc()
-        return None
-
-def batch_process(img_dir, green_gt_dir, base_output_dir, num_workers=None):
-    """
-    배치 처리 (병렬 처리 지원)
-    
-    Args:
-        img_dir: 원본 이미지 디렉토리
-        green_gt_dir: Green GT 이미지 디렉토리
-        base_output_dir: 결과 저장 디렉토리
-        num_workers: 병렬 처리 워커 수 (None이면 CPU 코어 수 - 2)
+    배치 처리
     """
     print(f"{'='*70}")
     print(f">>> GPU Activated: {Config.USE_GPU}")
     print(f">>> Model: {Config.MODEL_TYPE}")
     print(f"{'='*70}")
-
-    # 병렬 처리 워커 수 결정
-    if num_workers is None:
-        num_workers = max(1, cpu_count() - 2)  # CPU 코어 - 2 (안전하게)
-    
-    print(f">>> Parallel workers: {num_workers}")
 
     KST = timezone(timedelta(hours=9))
     timestamp = datetime.now(KST).strftime("%Y%m%d_%H%M%S")
@@ -739,7 +689,7 @@ def batch_process(img_dir, green_gt_dir, base_output_dir, num_workers=None):
                 break
 
         if green_gt_file:
-            matched_pairs.append((str(original_file), str(green_gt_file), output_dir))
+            matched_pairs.append((str(original_file), str(green_gt_file)))
         else:
             print(f"!!! No matching green GT for {original_file.name}")
 
@@ -749,26 +699,20 @@ def batch_process(img_dir, green_gt_dir, base_output_dir, num_workers=None):
         print("!!! No matched pairs found.")
         return
     
-    # 병렬 처리
-    print(f"\n>>> Starting parallel processing with {num_workers} workers...")
-    
-    if num_workers == 1:
-        # 단일 프로세스 (디버깅용)
-        all_summaries = []
-        for args in tqdm(matched_pairs, desc="Processing pairs"):
-            summary = process_single_pair(args)
-            if summary is not None:
-                all_summaries.append(summary)
-    else:
-        # 멀티프로세스
-        with Pool(num_workers) as pool:
-            results = list(tqdm(
-                pool.imap(process_single_pair, matched_pairs),
-                total=len(matched_pairs),
-                desc="Processing pairs"
-            ))
-        
-        all_summaries = [r for r in results if r is not None]
+    all_summaries = []
+
+    for original_path, green_gt_path in tqdm(matched_pairs, desc="Processing pairs"):
+        try:
+            _, _, summary = process_image_pair(
+                original_path, green_gt_path, output_dir,
+                visualize_spots=False
+            )
+            all_summaries.append(summary)
+        except Exception as e:
+            print(f"\n  !!! Error: {e}")
+            import traceback
+            traceback.print_exc()
+            continue
     
     if all_summaries:
         summary_df = pd.DataFrame(all_summaries)
@@ -780,8 +724,7 @@ def batch_process(img_dir, green_gt_dir, base_output_dir, num_workers=None):
             f.write("="*70 + "\n")
             f.write("CELL DEATH ANALYSIS - BATCH SUMMARY\n")
             f.write("="*70 + "\n")
-            f.write(f"Timestamp: {timestamp}\n")
-            f.write(f"Parallel Workers: {num_workers}\n\n")
+            f.write(f"Timestamp: {timestamp}\n\n")
             f.write(f"Total Pairs Processed: {len(all_summaries)}\n")
             f.write(f"Total Cells: {summary_df['total_cells'].sum()}\n")
             f.write(f"Total Dead Cells: {summary_df['dead_cells'].sum()}\n")
@@ -809,10 +752,8 @@ def batch_process(img_dir, green_gt_dir, base_output_dir, num_workers=None):
 # ===== 실행 =====
 
 if __name__ == '__main__':
-    # 병렬 처리 워커 수 지정 (기본: CPU 코어 - 2)
     batch_process(
         img_dir=Config.IMG_DIR,
         green_gt_dir=Config.GREEN_GT_DIR,
-        base_output_dir=Config.OUTPUT_DIR,
-        num_workers=8  # 원하는 워커 수 지정 (None이면 자동)
+        base_output_dir=Config.OUTPUT_DIR
     )

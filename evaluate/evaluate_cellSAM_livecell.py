@@ -1,3 +1,4 @@
+# Token발급이 안됨.
 import os
 import time
 import numpy as np
@@ -62,7 +63,7 @@ def evaluate_cellsam():
     print(">>> Loading CellSAM model...")
     try:
         # get_model()로 pretrained 모델 다운로드/로드
-        cellsam_model = get_model(device=device)
+        cellsam_model = get_model()
         print(">>> CellSAM model loaded successfully!")
     except Exception as e:
         print(f"!!! Error loading CellSAM model: {e}")
@@ -81,13 +82,12 @@ def evaluate_cellsam():
         # CellSAM 실행
         start_t = time.time()
         try:
-            # segment_cellular_image(img, model, device=device)
+            # segment_cellular_image(img, model)
             mask_pred = segment_cellular_image(
                 img, 
                 cellsam_model,
                 normalize=True,
-                postprocess=False,
-                device=device
+                postprocess=False,              
             )
             proc_time = time.time() - start_t
         except Exception as e:
